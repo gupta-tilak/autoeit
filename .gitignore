@@ -1,6 +1,8 @@
 data/Nebrija-INMIGRA
 data/Nebrija-WOCAE
 data/SPLLOC1
+data/processed
+data/augmented
 src/__pycache__/
 tests/__pycache__/
 .pytest_cache/

@@ -1,13 +1,13 @@
-"""AutoEIT – Audio preprocessing (resample, denoise, segment).
+"""AutoEIT - Audio preprocessing (resample, denoise, segment).
 
 Pipeline
 --------
 1. Load raw MP3 (librosa), convert stereo → mono, optionally extract
    utterance clip via start_ms / end_ms.
 2. Resample to 16 kHz (kaiser_best).
-3. Noise reduction (noisereduce) + Butterworth band-pass 80–7600 Hz.
+3. Noise reduction (noisereduce) + Butterworth band-pass 80-7600 Hz.
 4. VAD trim of leading/trailing silence (webrtcvad, aggressiveness=2).
-5. RMS normalisation to −20 dBFS, peak-clip ±0.99.
+5. RMS normalisation to - 20 dBFS, peak-clip ±0.99.
 6. Quality gate: reject if SNR < threshold, duration < 0.5 s or > 30 s
    (>30 s triggers chunking instead of rejection).
 7. Chunking: 25 s segments with 2 s overlap for long files.
