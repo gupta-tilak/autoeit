@@ -39,6 +39,7 @@ datasets:
     l1_map: "from l1_group column directly"
     speaker_id: "media_stem"
     denoise_strength: 0.80
+    snr_threshold: 5.0
   Nebrija-WOCAE:
     l1_map:
       "2018": "Chinese"
@@ -46,10 +47,12 @@ datasets:
       "Chinese": "Chinese"
     speaker_id: "media_stem"
     denoise_strength: 0.75
+    snr_threshold: 4.0
   SPLLOC1:
     l1_map: "all English"
     speaker_id: "media_stem + role_code"
     denoise_strength: 0.70
+    snr_threshold: 5.0
 
 splits:
   train_fraction: 0.70

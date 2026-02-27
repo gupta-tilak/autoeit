@@ -8,6 +8,7 @@ soundfile
 noisereduce
 pydub
 webrtcvad
+resampy
 jiwer
 evaluate
 peft
@@ -17,6 +18,7 @@ pandas
 matplotlib
 seaborn
 scipy
+joblib
 audiomentations
 sacrebleu
 jinja2
