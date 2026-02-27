@@ -59,3 +59,48 @@ splits:
   dev_fraction: 0.15
   test_fraction: 0.15
   random_seed: 42
+
+augmentation:
+  seed: 42
+  target_dbfs: -20.0
+
+  datasets:
+    Nebrija-INMIGRA:
+      multiplier: 4
+      min_l1_pct: 0.05          # each L1 must be ≥5% of INMIGRA total
+      low_resource_multiplier: 6 # L1 groups with < 3 original sessions
+      strategies:
+        - tag: sp090_wn15
+          speed_factor: 0.90
+          noise_type: white
+          noise_snr_db: 15
+        - tag: sp110_pn18
+          speed_factor: 1.10
+          noise_type: pink
+          noise_snr_db: 18
+        - tag: sp095_revsm
+          speed_factor: 0.95
+          reverb: small
+
+    Nebrija-WOCAE:
+      multiplier: 4
+      strategies:
+        - tag: sp085_wn12
+          speed_factor: 0.85
+          noise_type: white
+          noise_snr_db: 12
+        - tag: sp115_ps1_pn16
+          speed_factor: 1.15
+          pitch_steps: 1
+          noise_type: pink
+          noise_snr_db: 16
+        - tag: sp105_revmd
+          speed_factor: 1.05
+          reverb: medium
+
+    SPLLOC1:
+      multiplier: 2
+      strategies:
+        - tag: sp092_vj
+          speed_factor: 0.92
+          volume_jitter: true
