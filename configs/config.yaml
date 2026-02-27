@@ -1,0 +1,58 @@
+audio:
+  sample_rate: 16000
+  channels: 1
+  max_duration_sec: 30
+  silence_thresh_db: -40
+  min_silence_ms: 300
+  min_utterance_sec: 0.5
+
+model:
+  base_model: "openai/whisper-large-v3"
+  language: "es"
+  task: "transcribe"
+  use_lora: true
+  lora_r: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
+  target_modules: ["q_proj", "v_proj", "k_proj", "out_proj", "fc1", "fc2"]
+
+training:
+  batch_size: 8
+  gradient_accumulation: 4
+  learning_rate: 1.0e-5
+  warmup_steps: 300
+  max_steps: 3000
+  fp16: true
+  eval_steps: 300
+  save_steps: 300
+
+paths:
+  manifest: "manifest.csv"
+  data_root: "."
+  processed_data: "data/processed"
+  transcripts: "data/transcripts"
+  output_dir: "models/checkpoints"
+  results_dir: "results"
+
+datasets:
+  Nebrija-INMIGRA:
+    l1_map: "from l1_group column directly"
+    speaker_id: "media_stem"
+    denoise_strength: 0.80
+  Nebrija-WOCAE:
+    l1_map:
+      "2018": "Chinese"
+      "2019": "Chinese"
+      "Chinese": "Chinese"
+    speaker_id: "media_stem"
+    denoise_strength: 0.75
+  SPLLOC1:
+    l1_map: "all English"
+    speaker_id: "media_stem + role_code"
+    denoise_strength: 0.70
+
+splits:
+  train_fraction: 0.70
+  dev_fraction: 0.15
+  test_fraction: 0.15
+  random_seed: 42
