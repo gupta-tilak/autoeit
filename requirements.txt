@@ -4,6 +4,8 @@ transformers>=4.40
 datasets
 openai-whisper
 pywhispercpp
+mlx>=0.18
+mlx-whisper
 librosa
 soundfile
 noisereduce

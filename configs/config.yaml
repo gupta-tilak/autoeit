@@ -7,18 +7,18 @@ audio:
   min_utterance_sec: 0.5
 
 model:
-  base_model: "openai/whisper-large-v3"
+  base_model: "openai/whisper-small"
   language: "es"
   task: "transcribe"
   use_lora: true
-  lora_r: 16
-  lora_alpha: 32
+  lora_r: 8
+  lora_alpha: 16
   lora_dropout: 0.05
   target_modules: ["q_proj", "v_proj", "k_proj", "out_proj", "fc1", "fc2"]
 
 training:
   batch_size: 8
-  gradient_accumulation: 4
+  gradient_accumulation: 8
   learning_rate: 1.0e-5
   warmup_steps: 300
   max_steps: 3000
