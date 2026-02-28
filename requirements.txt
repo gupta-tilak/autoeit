@@ -3,6 +3,7 @@ torchaudio
 transformers>=4.40
 datasets
 openai-whisper
+pywhispercpp
 librosa
 soundfile
 noisereduce
