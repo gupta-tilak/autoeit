@@ -17,8 +17,8 @@ model:
   target_modules: ["q_proj", "v_proj", "k_proj", "out_proj", "fc1", "fc2"]
 
 training:
-  batch_size: 8
-  gradient_accumulation: 8
+  batch_size: 2
+  gradient_accumulation: 4
   learning_rate: 1.0e-5
   warmup_steps: 300
   max_steps: 3000

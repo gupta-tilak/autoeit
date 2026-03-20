@@ -16,6 +16,7 @@ Key changes vs original:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import math
@@ -23,6 +24,7 @@ import os
 import random
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -30,6 +32,13 @@ import librosa
 import numpy as np
 import pandas as pd
 import yaml
+
+# ── Fast audio I/O (10-50x faster than librosa for WAV files) ──────────────
+try:
+    import soundfile as sf
+    _HAS_SOUNDFILE = True
+except ImportError:
+    _HAS_SOUNDFILE = False
 
 # ── MLX imports ────────────────────────────────────────────────────────────
 try:
@@ -118,12 +127,25 @@ def _init_special_tokens(processor: WhisperProcessor, language: str = "es") -> N
 # ══════════════════════════════════════════════════════════════════════════
 
 class EITDataset:
+    """Lazy-loading dataset with **disk-cached mel features** and fast I/O.
+
+    Optimisations
+    ─────────────
+    • ``soundfile.read()`` instead of ``librosa.load()`` (10-50× faster for
+      WAV files that are already at 16 kHz).
+    • Mel spectrograms are computed once and saved to ``data/mel_cache/*.npy``.
+      Subsequent accesses load the cached ``.npy`` instead of re-running the
+      HuggingFace feature extractor.
+    • Token sequences are also cached in a dict (tiny, ~50 bytes each).
+    """
+
     def __init__(
         self,
         df: pd.DataFrame,
         processor: WhisperProcessor,
         max_audio_len: int = MAX_AUDIO_SAMPLES,
         max_label_len: int = MAX_LABEL_LEN,
+        mel_cache_dir: str = "data/mel_cache",
     ) -> None:
         self.df = df.reset_index(drop=True)
         self.processor = processor
@@ -133,16 +155,20 @@ class EITDataset:
         self.max_label_len = max_label_len
         self._prefix = [SOT, LANG_TOKEN, TRANSCRIBE_TOKEN, NO_TIMESTAMPS_TOKEN]
 
+        # ── Mel disk cache ──
+        self._mel_cache_dir = Path(mel_cache_dir)
+        self._mel_cache_dir.mkdir(parents=True, exist_ok=True)
+
+        # ── Token cache (in-memory, tiny) ──
+        self._tok_cache: Dict[int, Tuple[np.ndarray, np.ndarray]] = {}
+
     def __len__(self) -> int:
         return len(self.df)
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         row = self.df.iloc[idx]
-        audio = self._load_audio(row)
-        mel = self._extract_features(audio)
-        # ✅ FIX: delete audio immediately after feature extraction to free RAM
-        del audio
-        decoder_input, labels = self._tokenize(str(row.transcript))
+        mel = self._get_mel(idx, row)
+        decoder_input, labels = self._get_tokens(idx, row)
         return {
             "mel": mel,
             "decoder_input": decoder_input,
@@ -151,8 +177,54 @@ class EITDataset:
             "l1_group": row.get("l1_group", ""),
         }
 
+    # ── Mel with disk cache ──────────────────────────────────────────────
+
+    def _cache_key(self, row: pd.Series) -> str:
+        """Deterministic cache key from the processed audio path."""
+        path_str = str(row.processed_path)
+        return hashlib.md5(path_str.encode()).hexdigest()
+
+    def _get_mel(self, idx: int, row: pd.Series) -> np.ndarray:
+        cache_file = self._mel_cache_dir / f"{self._cache_key(row)}.npy"
+        if cache_file.exists():
+            return np.load(cache_file)
+        # Cache miss → compute & save
+        audio = self._load_audio(row)
+        mel = self._extract_features(audio)
+        del audio
+        try:
+            np.save(cache_file, mel)
+        except OSError:
+            pass  # disk full / permissions — continue without caching
+        return mel
+
+    # ── Token cache (in-memory) ──────────────────────────────────────────
+
+    def _get_tokens(self, idx: int, row: pd.Series) -> Tuple[np.ndarray, np.ndarray]:
+        if idx in self._tok_cache:
+            return self._tok_cache[idx]
+        tokens = self._tokenize(str(row.transcript))
+        self._tok_cache[idx] = tokens
+        return tokens
+
+    # ── Audio loading ────────────────────────────────────────────────────
+
     def _load_audio(self, row: pd.Series) -> np.ndarray:
-        audio, _ = librosa.load(str(row.processed_path), sr=TARGET_SR, mono=True)
+        path = str(row.processed_path)
+
+        # soundfile is 10-50× faster than librosa for WAV at target SR
+        if _HAS_SOUNDFILE:
+            try:
+                audio, sr = sf.read(path, dtype="float32")
+                if audio.ndim > 1:
+                    audio = audio.mean(axis=1)
+                if sr != TARGET_SR:
+                    audio = librosa.resample(audio, orig_sr=sr, target_sr=TARGET_SR)
+            except Exception:
+                audio, _ = librosa.load(path, sr=TARGET_SR, mono=True)
+        else:
+            audio, _ = librosa.load(path, sr=TARGET_SR, mono=True)
+
         has_ts = str(row.get("has_timestamps", "True")).lower() == "true"
         if not has_ts and len(audio) > self.max_audio_len:
             start = random.randint(0, len(audio) - self.max_audio_len)
@@ -441,6 +513,12 @@ class WhisperLoRATrainer:
         self.optimizer = optim.AdamW(learning_rate=self.learning_rate)
         self.early_stopping = EarlyStoppingOnOverfit(patience=3, delta=0.05)
 
+        # ✅ OPT: create loss_fn once (was re-created every step)
+        self._loss_fn = nn.value_and_grad(self.model, compute_loss)
+
+        # ✅ OPT: background thread pool for data prefetching
+        self._prefetch_pool = ThreadPoolExecutor(max_workers=2)
+
         self.global_step: int = 0
         self.best_wer: float = float("inf")
         self.best_checkpoint: str = ""
@@ -486,12 +564,11 @@ class WhisperLoRATrainer:
     # ✅ FIX #8: Core fix — accumulate gradients as a RUNNING SUM,
     # not by storing all micro-batch tensors at once.
     def _train_step(self, micro_batches: List[Dict[str, mx.array]]) -> float:
-        loss_fn = nn.value_and_grad(self.model, compute_loss)
         accumulated_grads = None
         total_loss = 0.0
 
         for batch in micro_batches:
-            loss, grads = loss_fn(
+            loss, grads = self._loss_fn(
                 self.model, batch["mel"], batch["tokens"], batch["labels"]
             )
             # Force evaluation immediately so MLX can free the compute graph
@@ -618,10 +695,21 @@ class WhisperLoRATrainer:
                     self.batch_size * self.grad_accum)
         logger.info("  lr=%.2e  warmup=%d  max_steps=%d",
                     self.learning_rate, self.warmup_steps, self.max_steps)
+        logger.info("  mel_cache: %s", self.train_dataset._mel_cache_dir)
+        n_cached = sum(1 for _ in self.train_dataset._mel_cache_dir.glob("*.npy"))
+        n_total = len(self.train_dataset)
+        if n_cached < n_total:
+            logger.info("  ⚡ %d/%d mels cached — first epoch will be slower (building cache)",
+                        n_cached, n_total)
+        else:
+            logger.info("  ⚡ mel cache warm (%d files) — data loading will be fast", n_cached)
         logger.info("═" * 60)
 
         t_start = time.perf_counter()
         epoch = 0
+        # ── ETA tracking state ──
+        _step_times: List[float] = []     # wall-clock seconds per optimiser step
+        _step_t0: float = t_start         # start-of-current-step timestamp
 
         try:
             while self.global_step < self.max_steps:
@@ -630,15 +718,37 @@ class WhisperLoRATrainer:
                                for i in range(0, len(indices), self.batch_size)]
                 micro_buffer: List[Dict[str, mx.array]] = []
 
-                for batch_indices in idx_batches:
+                # ── Prefetching: submit first batch load immediately ──
+                prefetch_future = None
+                batch_iter = iter(enumerate(idx_batches))
+
+                def _load_next():
+                    """Get next batch indices and submit prefetch."""
+                    nonlocal prefetch_future
+                    try:
+                        _, next_indices = next(batch_iter)
+                        prefetch_future = self._prefetch_pool.submit(
+                            self._collate, next_indices
+                        )
+                    except StopIteration:
+                        prefetch_future = None
+
+                _load_next()  # kick off first prefetch
+
+                while prefetch_future is not None:
                     if self.global_step >= self.max_steps:
                         break
 
+                    # Wait for the prefetched batch
                     try:
-                        batch = self._collate(batch_indices)
+                        batch = prefetch_future.result()
                     except Exception as exc:
                         logger.warning("Skipping batch (load error): %s", exc)
+                        _load_next()
                         continue
+
+                    # Immediately submit next prefetch (overlaps with GPU work)
+                    _load_next()
 
                     micro_buffer.append(batch)
 
@@ -658,16 +768,40 @@ class WhisperLoRATrainer:
                         self.global_step += 1
                         micro_buffer = []
 
+                        # ── ETA bookkeeping ──
+                        _step_t1 = time.perf_counter()
+                        _step_times.append(_step_t1 - _step_t0)
+                        _step_t0 = _step_t1
+
                         if self.global_step % self.logging_steps == 0:
                             avg = float(np.mean(self.train_losses[-self.logging_steps:]))
                             lr = self._get_lr(self.global_step)
-                            logger.info("  step %d/%d  loss=%.4f  lr=%.2e",
-                                        self.global_step, self.max_steps, avg, lr)
+                            # Compute speed & ETA
+                            elapsed = _step_t1 - t_start
+                            recent = _step_times[-50:]  # smooth over last 50 steps
+                            sec_per_step = float(np.mean(recent))
+                            steps_left = self.max_steps - self.global_step
+                            eta_sec = sec_per_step * steps_left
+                            pct = 100.0 * self.global_step / self.max_steps
+                            logger.info(
+                                "  step %d/%d (%.1f%%)  loss=%.4f  lr=%.2e  "
+                                "│ %.2f s/step  elapsed %s  ETA %s",
+                                self.global_step, self.max_steps, pct, avg, lr,
+                                sec_per_step, _fmt_time(elapsed), _fmt_time(eta_sec),
+                            )
 
                         if self.global_step % self.eval_steps == 0:
+                            _eval_t0 = time.perf_counter()
                             metrics = self.evaluate()
+                            _eval_dur = time.perf_counter() - _eval_t0
                             metrics["step"] = self.global_step
                             self.eval_results.append(metrics)
+                            logger.info(
+                                "  │ eval took %s  │  total progress: %d/%d (%.1f%%)",
+                                _fmt_time(_eval_dur),
+                                self.global_step, self.max_steps,
+                                100.0 * self.global_step / self.max_steps,
+                            )
                             if metrics["wer"] < self.best_wer:
                                 self.best_wer = metrics["wer"]
                                 self.best_checkpoint = self.save_checkpoint("best")
@@ -683,7 +817,13 @@ class WhisperLoRATrainer:
                 if self.early_stopping.should_stop:
                     break
                 epoch += 1
-                logger.info("── Epoch %d complete ──", epoch)
+                elapsed = time.perf_counter() - t_start
+                logger.info(
+                    "── Epoch %d complete  │  step %d/%d (%.1f%%)  │  elapsed %s ──",
+                    epoch, self.global_step, self.max_steps,
+                    100.0 * self.global_step / self.max_steps,
+                    _fmt_time(elapsed),
+                )
 
         except KeyboardInterrupt:
             logger.warning("Interrupted at step %d", self.global_step)

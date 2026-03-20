@@ -1,10 +1,39 @@
+# Raw corpus data (large, not tracked)
 data/Nebrija-INMIGRA
 data/Nebrija-WOCAE
 data/SPLLOC1
+
+# Processed / generated data
 data/processed
 data/augmented
+data/mel_cache
+data/transcripts/backups/
+
+# Model artifacts
+models/checkpoints/
+models/adapters
+fused/
+
+# Archives (large binaries)
+*.zip
+
+# Python
 src/__pycache__/
 tests/__pycache__/
+__pycache__/
+*.pyc
 .pytest_cache/
+
+# Logs and outputs
 logs/
 outputs/
+
+# OS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+
+# Virtual environment
+.venv/
